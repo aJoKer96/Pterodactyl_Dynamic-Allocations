@@ -1,11 +1,31 @@
 {
   "id": "dynamic-allocations",
   "name": "Dynamic Allocations",
-  "version": "0.1.0",
-  "description": "Create servers with direct IPv4 and port input, without pre-creating allocations.",
+  "version": "0.2.0",
+  "description": "Create servers with direct IPv4 and port input, automatic allocations and reusable per-egg port presets.",
   "author": "aJoKer96",
-  "requires": {"panel": "2.0.0-beta.3", "sdk": "2.0.0-beta.6", "php": "^8.3"},
+  "requires": {
+    "panel": "2.0.0-beta.3",
+    "sdk": "2.0.0-beta.6",
+    "php": "^8.3"
+  },
   "provider": "DynamicAllocations\\Provider",
-  "autoload": {"DynamicAllocations\\": "src"},
-  "ui": {"entry": "dist/client.js", "mode": "native", "screens": [{"id":"create","area":"admin","path":"dynamic-allocations","nav":{"label":"Dynamic Allocations","icon":"network"}}]}
+  "autoload": {
+    "DynamicAllocations\\": "src"
+  },
+  "ui": {
+    "entry": "dist/client.js",
+    "mode": "native",
+    "screens": [
+      {
+        "id": "create",
+        "area": "admin",
+        "path": "dynamic-allocations",
+        "nav": {
+          "label": "Dynamic Allocations",
+          "icon": "network"
+        }
+      }
+    ]
+  }
 }

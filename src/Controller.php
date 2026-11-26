@@ -6,6 +6,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Pterodactyl\Models\Node;
+use Pterodactyl\Services\Extensions\ExtensionSettings;
 use Pterodactyl\Models\Egg;
 use Pterodactyl\Models\User;
 use Pterodactyl\Models\Allocation;
@@ -24,9 +25,28 @@ final class Controller {
         $ips = Allocation::query()->select('node_id','ip')->distinct()->get()->groupBy('node_id');
         return response()->json([
             'nodes' => $nodes->map(fn($n) => ['id'=>$n->id,'name'=>$n->name,'ips'=>($ips->get($n->id,collect()))->pluck('ip')->filter(fn($ip)=>filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)&&$ip!=='0.0.0.0')->values()]),
-            'eggs' => Egg::query()->with('variables')->orderBy('name')->get()->map(fn($e)=>['id'=>$e->id,'name'=>$e->name,'startup'=>$e->startup,'images'=>array_values($e->docker_images??[]),'variables'=>$e->variables->map(fn($v)=>['name'=>$v->name,'key'=>$v->env_variable,'default'=>$v->default_value??'','description'=>$v->description])]),
+            'eggs' => Egg::query()->with('variables')->orderBy('name')->get()->map(fn($e)=>['id'=>$e->id,'name'=>$e->name,'startup'=>$e->startup,'images'=>array_values($e->docker_images??[]),'port_preset'=>$this->presetFor($e), 'variables'=>$e->variables->map(fn($v)=>['name'=>$v->name,'key'=>$v->env_variable,'default'=>$v->default_value??'','description'=>$v->description])]),
             'users' => User::query()->orderBy('username')->get(['id','username']),
         ])->header('Cache-Control','no-store');
+    }
+    private function settingsFor(Egg $egg): ExtensionSettings {
+        return (new ExtensionSettings('dynamic-allocations'))->for($egg);
+    }
+    private function presetFor(Egg $egg): ?array {
+        return Presets::fromStored($this->settingsFor($egg)->get('port_preset'));
+    }
+    public function savePreset(Request $request, Egg $egg): JsonResponse {
+        $this->admin($request);
+        $input=$request->validate(['primary'=>'required|string|max:5','additional'=>'nullable|string|max:512']);
+        try { $preset=Presets::fromInput($input['primary'],$input['additional']??''); }
+        catch(InvalidArgumentException $e) { throw ValidationException::withMessages(['ports'=>$e->getMessage()]); }
+        $this->settingsFor($egg)->set('port_preset',$preset);
+        return response()->json(['port_preset'=>$preset])->header('Cache-Control','no-store');
+    }
+    public function deletePreset(Request $request, Egg $egg): JsonResponse {
+        $this->admin($request);
+        $this->settingsFor($egg)->forget('port_preset');
+        return response()->json(['port_preset'=>null])->header('Cache-Control','no-store');
     }
     public function create(Request $request): JsonResponse {
         $this->admin($request);
