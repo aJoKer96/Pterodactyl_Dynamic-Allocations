@@ -1,59 +1,116 @@
-# Dynamic Allocations v0.3.0 — preview
+# Dynamic Allocations v0.4.1 — native integration (hotfix)
 
-Native Pterodactyl Panel extension for **2.0.0-beta.3 / SDK 2.0.0-beta.6**. No Wings patch, host service, additional database migration or core file modification. Admin > Dynamic Allocations offers a separate creation screen; the stock creation screen and node allocation inventory are unchanged. The SDK in beta.3 cannot replace the native allocation box. The extension is intended for a single administrator on a test panel first.
+**Target: Pterodactyl Panel 2.0.0-beta.3 / SDK 2.0.0-beta.6, PHP 8.3/8.4, MariaDB/MySQL, Wings 1.13.5.** This release changes the existing Admin → Servers → New Server and Build Configuration forms. The beta.3 SDK does not expose these admin form components as overridable views, so this is a two-part installation: a native `.pteroext` backend and a version-pinned frontend source patch. Installing only the extension does **not** replace the stock forms.
 
-## Installation
+No additional Wings/host service, Wings fork, Docker socket, database migration or panel PHP core modification. The separate v0.3 creation screen becomes **Dynamic Allocations Settings**, for optional node IPv4 overrides. All other native form sections, extension fields, native activity logging and query invalidations are retained. Native node allocation inventory remains available for diagnostics; pre-creating entries is no longer necessary. Client-side network UI and native server transfers are unchanged.
 
-Upload the accompanying `.pteroext` (ZIP with the runtime manifest at its root) through Admin > Extensions > Install. Enable only on the test panel, or use CLI from `/var/www/pterodactyl`:
+## Upgrade from v0.4.0 (no frontend rebuild)
 
-```sh
-php artisan p:extension:install /path/to/dynamic-allocations-0.3.0.pteroext
-chown -R www-data:www-data extensions public/assets/extensions
-php artisan p:extension:enable dynamic-allocations
-php artisan p:extension:list
+v0.4.1 incorporates the confirmed route-binding fix: `{server:admin_identifier}`, `{node:id}`, `{egg:id}`. Pterodactyl's base model uses UUID route keys by default, whereas the extension sends numeric IDs. The native UI patch and allocation logic are unchanged. The extension settings screen version label and fresh-install deployment version guard are updated.
+
+On an already patched v0.4.0 panel, keep the previous extension archive and the **original frontend rollback backup** (for example `/root/pterodactyl-da-040-backup`). Back up the panel database. Install only the new extension package from the extension manager or run:
+
+```bash
+cd /var/www/pterodactyl
+runuser -u www-data -- php artisan p:extension:install /tmp/dynamic-allocations-0.4.1.pteroext --replace --enable
+runuser -u www-data -- php artisan optimize:clear
+systemctl reload php8.3-fpm
+runuser -u www-data -- php artisan p:extension:list
 ```
 
-Alternatively the source directory can be checked and packaged using the Panel's own `php artisan p:extension:pack /path/to/dynamic-allocations --output=/tmp/dynamic-allocations.pteroext`. The frontend is a plain JavaScript ESM module using the SDK and React from the panel import map; no local npm build necessary. Disable with `php artisan p:extension:disable dynamic-allocations`. If extension loading causes problems, set `PTERODACTYL_EXTENSIONS_ENABLED=false` in `.env`, clear configuration cache and reload PHP-FPM. Existing allocations and servers remain intact.
+Reload the browser and verify both native allocation forms. Do **not** rebuild or redeploy the existing frontend for this upgrade. If rolling back the frontend later, use the backup from its original deployment, not a new empty backup directory. v0.4.0 without the route fix has the known HTTP 404 issue.
 
-## Upgrade from v0.1.0 or v0.2.0
+## Installation (test panel first)
 
-Back up the panel database and keep the previous `.pteroext`. On a test panel, upload the new package through the extension manager and confirm replacement, or run from the panel directory (use the actual uploaded file path):
+Keep a verified panel/database backup and previous extension package. Test on a separate node and panel copy, not a cloned panel connected to production Wings. The core workflow was successfully tested by the maintainer on beta.3 with v0.4.0 and the route-binding hotfix. This is still a beta-targeted release, not a general production compatibility guarantee. Use a single root administrator; do not provision or reassign ports concurrently from other native/API paths or start/transfer servers while editing bindings.
 
-```sh
-php artisan p:extension:install /path/to/dynamic-allocations-0.3.0.pteroext --replace
-php artisan p:extension:list
+### 1. Build the native frontend in a separate checkout
+
+Extract the **source ZIP**, not the `.pteroext`, on a Linux system (WSL also works). Use a trusted regular user with Python 3, git, Node.js >=22.12 and npm, internet access and sufficient disk/RAM. Do not install npm dependencies as root. No Node.js process will be needed after building. Use a new path that does not yet exist:
+
+```bash
+bash patch/build.sh "$HOME/pterodactyl-da-041-build"
 ```
 
-The installed extension identifier stays `dynamic-allocations`; an enabled extension stays enabled. If needed, enable it with `php artisan p:extension:enable dynamic-allocations`. Refresh the browser. For rollback, disable the extension or install the previous archive with `--replace`. No server, allocation or egg is changed by installation alone. Saved defaults are stored in existing extension settings; a downgrade does not need to delete them.
+The script clones the official exact `v2.0.0-beta.3` tag, checks the Git blob SHA-1s of all three changed files, applies the patch, runs `npm ci`, `npm run tsc` and `npm run build:production` (including upstream extension runtime checks). It writes a successful-build marker only after all stages succeed. Nothing in `/var/www/pterodactyl` is touched. If any stage fails, stop and report the exact output. Do not bypass hash or typecheck gates. To retry with a fresh checkout, use a different build directory.
 
-## Default ports per egg (since v0.2.0)
+The patch modifies `resources/scripts/components/admin/servers/CreateServerForm.tsx`, `ServerBuildTab.tsx`, `resources/scripts/api/admin/servers/queries.ts`, and adds `DynamicNetwork.tsx` under the admin servers components. The existing mutations retain their native success/error handlers and cache invalidation; patched submissions route through the extension backend.
 
-In Admin > Dynamic Allocations, select an egg, enter the comma-separated port list in Network, and click **Save current ports as defaults**. This stores a preset for that egg using the panel's native `ExtensionSettings::for(Egg)` API, under the extension's `port_preset` key. There is no additional migration or local browser storage. Root administrators only may read and change these presets through the extension endpoints. Saving validates and normalizes the port list with the same parser used for creation, but does not allocate or reserve any port. Presets are shared by administrators of this panel and apply independently of the node.
+### 2. Upgrade and enable the extension
 
-Selecting an egg fills its saved ports or clears the port inputs if none exist. **Apply saved defaults** restores the preset after manual edits. **Remove saved defaults** deletes the preset without changing the current form or existing allocations. Manual edits affect only the current server unless explicitly saved. There are no automatically guessed or bundled presets; e.g. enter `80, 443` for the future direct-listen NGINX proxy, or `25565` for Minecraft. The current NGINX v0.1 image does not yet support direct listening on 80/443. Availability still depends on the selected node/IP and native allocation/host state; it is validated at creation, not when saving defaults.
+Upload `dynamic-allocations-0.4.1.pteroext` through Admin → Extensions, confirm replacement and enable. Or copy the package to a location readable by www-data and run on the panel host:
 
-## Network configuration (new in v0.3.0)
+```bash
+cd /var/www/pterodactyl
+runuser -u www-data -- php artisan p:extension:install /tmp/dynamic-allocations-0.4.1.pteroext --replace --enable
+runuser -u www-data -- php artisan p:extension:list
+```
 
-Select a node, then choose its IPv4 or `127.0.0.1 (Localhost / internal)` in Bind IP. There is no dependency on existing allocation rows. A literal node IPv4 or a unique DNS IPv4 from the node FQDN is suggested automatically when the node is not marked behind a proxy. DNS is not proof that an address is actually bound on the host: confirm the address before creating servers. If the FQDN is proxied, does not resolve uniquely, or points to a different address, expand **Configure node IPv4 (only if needed)** and save the real host IPv4 once. This is a node-scoped native ExtensionSettings value, not an allocation. Reset removes the override. Localhost remains available even on an empty node. Standard Wings bridge networking maps 127.0.0.1 allocations to its bridge interface, not necessarily a host-loopback-only socket. Check isolation and actual Docker bindings separately.
+Ensure the extension is enabled and the version is 0.4.1. Existing node overrides and per-egg presets retain the same storage keys. The extension manager settings page no longer creates servers; until the patch is deployed, native creation remains unchanged. If the settings page cannot load, resolve that before deployment.
 
-Enter ports in a single comma-separated field, e.g. `80, 443`. The first is primary, the rest are additional; order is preserved. Allowed: 1–65535, up to 32 ports. Empty entries, duplicates and ranges are rejected. Existing egg presets keep their original storage format and are presented as a single list. Presets and address settings never reserve ports by themselves.
+### 3. Deploy the built frontend (on panel host as root)
 
-Select owner, egg, image, startup, variables and resources as before. At creation, the backend validates the address against the current node options, creates missing rows and reuses free exact matches. Free rows on other IPs no longer block creation; assigned same-number ports on any IP of the node remain conservative conflicts (Wings bridge/wildcard ambiguity). Native StoreServerRequest and ServerController are then used for server creation. No IPv6, wildcard, existing server port editing or automatic deletion of free allocation rows. Native allocation inventory remains as a diagnostic/compatibility view. No host port scan, no additional node service.
+Use the source ZIP's `patch/deploy.py` and the successful build checkout from step 1. If built elsewhere, transfer the trusted build checkout (the built assets, success marker and patched source file must be present; node_modules is not required for deployment). Use absolute paths, a new backup location outside the panel directory and a brief maintenance window. The panel must use file-based Laravel maintenance mode (the default).
 
-For the NGINX proxy: choose public IPv4, 80 and 443; the NGINX egg itself still needs the separate direct-listen update (the previous egg listens on 18080/18443 and expects PROXY protocol). Check host TCP and UDP listeners and container bindings beforehand; Wings publishes both protocols. No host port scan is performed by the extension. Never give a public privileged port to an untrusted server owner without deliberate approval.
+```bash
+cd /var/www/pterodactyl
+runuser -u www-data -- php artisan down
+python3 /path/to/source/patch/deploy.py install /path/to/pterodactyl-da-041-build /var/www/pterodactyl /root/pterodactyl-da-041-backup
+runuser -u www-data -- php artisan optimize:clear
+systemctl reload php8.3-fpm
+runuser -u www-data -- php artisan up
+```
 
-## Failure behavior and tests
+Adjust the PHP-FPM service if the panel runs a different PHP version. If deployment fails, do not ignore the error: inspect the output and confirm the live manifest is still the original before bringing the panel back up. The installer checks the installed version, successful-build marker, extension version, file-based maintenance mode, manifest entries and SRI. It copies only manifest-referenced assets, refuses conflicting existing files, leaves all existing core/extension/theme assets in place, saves the old manifest with its hash/ownership and atomically replaces the manifest last. The live panel PHP files are not edited. Keep the backup and old hashed assets; do not prune assets while rollback is required. Refresh the browser completely (Ctrl+F5) and test. No Wings restart is needed to install the addon.
 
-Allocation preparation is transactional; a MariaDB named lock serializes extension requests per node. The native action commits the server before calling Wings. This is not one atomic transaction across the panel and Wings. Free allocations may remain after native validation/provision failure; they are intentionally not deleted and can be reused. Other native creation/assignment paths do not honor the extension lock: avoid concurrent provisioning or allocation edits from native UI/API/other extensions. This preview does not guarantee race-free operation in multi-admin installations. A timed-out response is ambiguous: verify native server list and Wings before retrying. No automatic retry or cleanup of data.
+## Using the native forms
 
-Static checks performed locally: PHP syntax, JS syntax, JSON parse and independent port/IP, node-address and preset tests (`php tests/ports.php` and `php tests/presets.php`). No live Panel/SDK/MariaDB/Wings integration, browser rendering, permission verification or official package validation has been run. Test on a disposable Panel copy and node; do not connect a cloned test Panel to production Wings with live credentials. Test: non-admin requests refused; create with a fresh high port and a free existing port; invalid/duplicate ports refused; existing assigned ports untouched; wrong node IP/tag rejected; simultaneous extension requests; rejected creation leaves only free rows; native server details and container mappings; disable extension and verify stock UI. For presets additionally save a preset for egg A, switch to egg B (empty or separate preset), switch back, refresh the browser, manually override ports, reapply and delete the preset. Verify persistence, non-admin denial, unchanged allocation count while saving/deleting, and that invalid or duplicate ports are refused. For v0.3.0 additionally run `php tests/network.php`; test an empty node, localhost, a unique FQDN address, multiple DNS answers or proxied FQDN with explicit override, comma-list ordering, rejection of malformed lists, reuse of free rows, existing assigned conflicts, and persistence of legacy presets. Then test 80/443 on isolated node, no other host listener, inspect `docker ps`, confirm HTTP and TLS independently. If a test fails, stop and inspect panel logs, rather than repeatedly pressing create.
+In Admin → Servers → New Server, select the node, choose the node IPv4 or `127.0.0.1`, and enter `80, 443` (or any list of up to 32 distinct comma-separated ports, 1–65535). The first is primary; the rest are additional. No pre-created allocation is required. Node IP comes from a literal or unique IPv4 DNS result for the node FQDN unless behind a proxy. If DNS is ambiguous or points elsewhere, set the actual Wings host bind IPv4 under Dynamic Allocations Settings; this is per node, not per server. Do not use a CDN address. `127.0.0.1` maps to the Docker bridge in typical Wings configurations, not necessarily a host-only binding. Confirm host/firewall reachability separately.
 
-## Upstream sources
-- https://docs.pterodactyl.io/v2/extensions
-- https://docs.pterodactyl.io/v2/extensions/frontend
-- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Http/Requests/Api/Admin/Servers/StoreServerRequest.php
-- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Actions/Servers/CreateServer.php
-- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Http/Controllers/Api/Admin/Servers/ServerController.php
+Choose an egg to load stored port defaults. Save/apply/remove defaults explicitly; they do not reserve ports. Selecting another egg or node reloads the network form, so check the ports before submission. For existing servers, stop the server first; open the original Build Configuration, edit the port list/IP and save. The current primary is first, other ports are sorted. A server with multiple existing bind IPs displays the complete list and preserves those bindings on a resource-only save. To convert it to a single IP, explicitly confirm replacement, choose the IP and enter the desired list; duplicate numeric ports must be resolved manually. Existing custom IPs can be left unchanged or migrated to a configured IP. The backend checks an allocation snapshot hash, so a stale form is rejected. It also checks Wings live `offline` state before changing bindings; if unreachable, the change fails. Restart the server through Pterodactyl after a successful network update and inspect actual Docker mappings. Native Wings sync may log failures without reverting the DB change; confirm the mapping before starting another service that uses the released port.
 
-- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Services/Extensions/ExtensionSettings.php
-- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Console/Commands/Extensions/InstallCommand.php
+The backend creates missing exact `(node, IP, port)` allocations, reuses free rows and the server's own rows, rejects another server's assigned ports (conservatively even on another IP of the node), computes the add/remove/primary diff, and delegates server creation/update to the native `StoreServerRequest` / `ServerController` and `UpdateServerBuildConfigurationRequest` / `BuildController`. Removed allocations are **unassigned**, not deleted. Other fields are validated by the native request. The existing native UI for inventory is not removed. Privileged ports are restricted to root-admin operations through this extension. A delegated admin without root privileges cannot use the patched allocation UI.
+
+Limitations: no IPv6, wildcard, port ranges, host port scan, TCP/UDP differentiation (Wings maps both), automatic cleanup of unused rows, or cross-node transfer patch. A MariaDB/MySQL advisory lock serializes this extension's operations, but other native paths do not honor it. A server can be started concurrently outside the extension; the offline check does not lock Wings power operations. Avoid concurrent starts, transfers, assignment edits and provision operations. There is no distributed transaction between the panel and Wings. If validation fails after preparing allocations, free rows can remain; they are reusable. If a request times out, check the server list/allocations and Wings before retrying.
+
+## Rollback
+
+With the panel in maintenance mode, restore the old manifest (the script refuses rollback if the current manifest has changed since patch deployment). Then disable or replace the extension. Existing server assignments and settings are not reverted by frontend rollback; restore a database backup only if an explicit DB rollback is needed and no subsequent changes must be kept.
+
+```bash
+cd /var/www/pterodactyl
+runuser -u www-data -- php artisan down
+python3 /path/to/source/patch/deploy.py rollback /var/www/pterodactyl /root/pterodactyl-da-041-backup
+runuser -u www-data -- php artisan p:extension:disable dynamic-allocations
+runuser -u www-data -- php artisan optimize:clear
+systemctl reload php8.3-fpm
+runuser -u www-data -- php artisan up
+```
+
+The original assets remain in place. For a panel upgrade, restore the stock frontend first; rebuild/review a new patch for the upgraded version rather than carrying beta.3 assets forward. Do not disable this extension while the patched frontend is active unless you are restoring the native manifest. This patch is intentionally version-locked.
+
+## Verification and test checklist
+
+Local checks: PHP syntax, JS syntax, TypeScript JSX syntax/transpilation of the new component, port/IP/preset and allocation snapshot/diff unit tests, Python/shell syntax. Patch anchors and blob hashes compared to upstream beta.3 via GitHub. Deployment/rollback tested on a synthetic asset tree; **full patch application, TypeScript typecheck, npm/Vite build and core workflow were reported successful by the maintainer on the deployed beta.3 panel after the route hotfix; not independently reproduced here**. The build script runs the real typecheck/build on your system and aborts on failure. For v0.4.1, the route registration regression test is additionally run locally; installation of the new archive on a live panel has not been repeated here.
+
+On a disposable panel/node:
+1. Verify native New Server has the new fields and all other native fields still work; no existing allocations required. Test first with a free high port and a second high port. Verify stored primary and additional allocation IDs, native details and Docker mapping.
+2. Save/reload/reapply an egg preset; switch node and egg. Verify the localhost/public-IP choices, manually configured IPv4 and no allocation creation by saving presets.
+3. Reject invalid/duplicate ports, another server's assigned port, invalid IP, non-root API calls and a stale revision. Test native egg tag validation and custom extension fields.
+4. Stop the test server; change its primary, add a port, remove a port, and change IP. Verify old rows become unassigned, desired rows assigned, native limits unchanged and restart produces the requested bindings. Try a changed binding while running; it must reject. For a mixed-IP server, test unchanged resource-only save and explicit single-IP conversion.
+5. Roll back the frontend and confirm stock forms return without changing server data. Only after these checks test ports 80/443 on a disposable node, checking both TCP and UDP host listeners first.
+
+NGINX Proxy v0.1 still listens on 18080/18443 and expects PROXY protocol. It must be upgraded separately before testing 80/443 with that egg.
+
+## Upstream source references
+
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/packages/sdk/views.json
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/resources/scripts/components/admin/servers/CreateServerForm.tsx
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/resources/scripts/components/admin/servers/ServerBuildTab.tsx
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/resources/scripts/api/admin/servers/queries.ts
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Actions/Servers/UpdateServerBuild.php
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/vite.config.mts
+- https://github.com/pterodactyl/wings/blob/v1.13.5/environment/environment.go
+
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Models/Model.php
+- https://github.com/pterodactyl/panel/blob/v2.0.0-beta.3/app/Models/Server.php

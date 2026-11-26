@@ -1,8 +1,8 @@
 {
   "id": "dynamic-allocations",
   "name": "Dynamic Allocations",
-  "version": "0.3.0",
-  "description": "Direct node or localhost bindings, comma-separated ports, automatic allocations and per-egg port presets.",
+  "version": "0.4.1",
+  "description": "Native server creation and build configuration integration (requires matching panel UI patch).",
   "author": "aJoKer96",
   "requires": {
     "panel": "2.0.0-beta.3",
@@ -18,11 +18,11 @@
     "mode": "native",
     "screens": [
       {
-        "id": "create",
+        "id": "settings",
         "area": "admin",
         "path": "dynamic-allocations",
         "nav": {
-          "label": "Dynamic Allocations",
+          "label": "Dynamic Allocations Settings",
           "icon": "network"
         }
       }

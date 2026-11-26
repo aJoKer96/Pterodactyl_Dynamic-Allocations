@@ -14,6 +14,11 @@ use Pterodactyl\Contracts\Servers\CreatesServers;
 use Pterodactyl\Http\Controllers\Api\Admin\Servers\ServerController;
 use Pterodactyl\Http\Requests\Api\Admin\Servers\StoreServerRequest;
 use InvalidArgumentException;
+use Pterodactyl\Models\Server;
+use Pterodactyl\Facades\Daemon;
+use Pterodactyl\Contracts\Servers\UpdatesServerBuild;
+use Pterodactyl\Http\Controllers\Api\Admin\Servers\BuildController;
+use Pterodactyl\Http\Requests\Api\Admin\Servers\UpdateServerBuildConfigurationRequest;
 
 final class Controller {
     private function admin(Request $request): void {
@@ -69,60 +74,101 @@ final class Controller {
         $this->settingsFor($egg)->forget('port_preset');
         return response()->json(['port_preset'=>null])->header('Cache-Control','no-store');
     }
-    public function create(Request $request): JsonResponse {
+    public function networkOptions(Request $request): JsonResponse {
         $this->admin($request);
-        $input=$request->validate([
-            'node_id'=>'required|integer|exists:nodes,id','ip'=>'required|string|max:15','ports'=>'required|string|max:512',
-            'server'=>'required|array:name,owner_id,egg_id,docker_image,startup,environment,memory,disk,cpu,swap,io,database_limit,backup_limit,allocation_limit,description,threads,start_on_completion',
-            'server.name'=>'required|string|max:191','server.owner_id'=>'required|integer|exists:users,id','server.egg_id'=>'required|integer|exists:eggs,id',
-            'server.docker_image'=>'required|string|max:191','server.startup'=>'required|string','server.environment'=>'present|array',
-            'server.memory'=>'required|integer|min:0','server.disk'=>'required|integer|min:0','server.cpu'=>'required|integer|min:0','server.swap'=>'required|integer|min:-1','server.io'=>'required|integer|between:10,1000',
-            'server.database_limit'=>'required|integer|min:0','server.backup_limit'=>'required|integer|min:0','server.allocation_limit'=>'required|integer|min:0',
-            'server.description'=>'nullable|string','server.threads'=>'nullable|string','server.start_on_completion'=>'required|boolean',
-        ]);
+        $input=$request->validate(['node_id'=>'required|integer|exists:nodes,id','egg_id'=>'nullable|integer|exists:eggs,id']);
+        $node=Node::query()->findOrFail($input['node_id']);
+        $egg=isset($input['egg_id']) ? Egg::query()->findOrFail($input['egg_id']) : null;
+        return response()->json(['node'=>$this->nodeOptions($node),'port_preset'=>$egg ? $this->presetFor($egg) : null])->header('Cache-Control','no-store');
+    }
+    private function snapshot(Server $server): array {
+        $rows=Allocation::query()->where('server_id',$server->id)->orderBy('id')->get(['id','ip','port']);
+        return NetworkPlan::snapshot((int)$server->allocation_id,$rows->map(fn($r)=>['id'=>(int)$r->id,'ip'=>$r->ip,'port'=>(int)$r->port])->all());
+    }
+    public function serverNetwork(Request $request, Server $server): JsonResponse {
+        $this->admin($request);
+        return response()->json(['node'=>$this->nodeOptions(Node::query()->findOrFail($server->node_id)), ...$this->snapshot($server)])->header('Cache-Control','no-store');
+    }
+    private function withNodeLock(Node $node, callable $callback): mixed {
+        $db=DB::connection();
+        $lock='dynamic-allocations-node-'.$node->id;
+        // Keep the advisory lock on the WRITE PDO even in a read/replica configuration.
+        if ((int)($db->selectOne('SELECT GET_LOCK(?, 10) AS acquired',[$lock],false)->acquired??0)!==1) abort(409,'Another dynamic operation is in progress.');
+        try { return $callback(); }
+        finally { $db->selectOne('SELECT RELEASE_LOCK(?) AS released',[$lock],false); }
+    }
+    private function desiredIds(Node $node, string $ip, array $ports, ?Server $server=null): array {
+        return DB::transaction(function() use($node,$ip,$ports,$server) {
+            $ids=[];
+            foreach($ports as $port) {
+                $rows=Allocation::query()->where('node_id',$node->id)->where('port',$port)->lockForUpdate()->get();
+                foreach($rows as $row) {
+                    if ($row->server_id!==null && (int)$row->server_id!==($server === null ? null : (int)$server->id)) throw ValidationException::withMessages(['ports'=>"Port {$port} is already assigned on this node."]);
+                }
+                $row=$rows->first(fn($row)=>$row->ip===$ip);
+                if (!$row) $row=Allocation::query()->create(['node_id'=>$node->id,'ip'=>$ip,'port'=>$port,'server_id'=>null,'ip_alias'=>null]);
+                $ids[]=(int)$row->id;
+            }
+            return $ids;
+        },3);
+    }
+    private function validateNetwork(Node $node, array $input): array {
         try { $ports=Ports::parseList($input['ports']); $ip=Ports::normalizeIp($input['ip']); }
         catch(InvalidArgumentException $e) { throw ValidationException::withMessages(['ports'=>$e->getMessage()]); }
-        $node=Node::query()->findOrFail($input['node_id']);
-        $egg=Egg::query()->findOrFail($input['server']['egg_id']);
-        if (!$node->acceptsEgg($egg)) throw ValidationException::withMessages(['node_id'=>'This node does not accept the selected egg tags.']);
         if ($node->isUnderMaintenance()) throw ValidationException::withMessages(['node_id'=>'Node is under maintenance.']);
-        // Derive the allowlist from the node configuration, never its port inventory.
         if (!in_array($ip,$this->nodeOptions($node)['ips'],true)) throw ValidationException::withMessages(['ip'=>'Select the current node IPv4 or localhost. Reload if the node address changed.']);
-        // Advisory lock serializes this extension on this node across HTTP workers. The
-        // native UI and other API clients do not take it; do not run parallel provisioning.
-        $lock='dynamic-allocations-node-'.$node->id;
-        $db=DB::connection();
-        if ((int)($db->selectOne('SELECT GET_LOCK(?, 10) AS acquired',[$lock])->acquired??0)!==1) abort(409,'Another dynamic creation is in progress.');
-        try {
-            $ids=$db->transaction(function() use($node,$ip,$ports) {
-                $ids=[];
-                foreach($ports as $port) {
-                    $rows=Allocation::query()->where('node_id',$node->id)->where('port',$port)->lockForUpdate()->get();
-                    foreach($rows as $row) {
-                        // Free rows on other addresses are not reservations. Assigned rows
-                        // are conservatively treated as conflicts even on different IPs.
-                        if ($row->server_id!==null) throw ValidationException::withMessages(['ports'=>"Port {$port} is already assigned on this node."]);
-                    }
-                    $row=$rows->first(fn($row)=>$row->ip===$ip);
-                    if (!$row) {
-                        $row=Allocation::query()->create(['node_id'=>$node->id,'ip'=>$ip,'port'=>$port,'server_id'=>null,'ip_alias'=>null]);
-                    }
-                    $ids[]=$row->id;
-                }
-                return $ids;
-            },3);
-            // Native FormRequest and controller: preserves native validation, egg tags,
-            // permission checks, activity log, and Wings creation/cleanup semantics.
-            // Do not hold an outer DB transaction during the Wings request: Wings needs
-            // to see the committed server record from the native action.
+        return [$ip,$ports];
+    }
+    public function create(Request $request): JsonResponse {
+        $this->admin($request);
+        $input=$request->validate(['node_id'=>'required|integer|exists:nodes,id','ip'=>'required|string|max:15','ports'=>'required|string|max:512','server'=>'required|array']);
+        $node=Node::query()->findOrFail($input['node_id']);
+        return $this->withNodeLock($node,function() use($request,$input,$node) {
+            $node->refresh();
+            [$ip,$ports]=$this->validateNetwork($node,$input);
             $payload=$input['server'];
+            // Never allow a deployment object to override our chosen node/ports.
+            unset($payload['deploy']);
+            $ids=$this->desiredIds($node,$ip,$ports);
             $payload['primary_allocation_id']=array_shift($ids);
             $payload['secondary_allocations_ids']=$ids;
             $request->replace($payload);
             $native=app(StoreServerRequest::class);
-            return app(ServerController::class)->store($native, app(CreatesServers::class));
-        } finally {
-            $db->selectOne('SELECT RELEASE_LOCK(?) AS released',[$lock]);
-        }
+            return app(ServerController::class)->store($native,app(CreatesServers::class));
+        });
+    }
+    public function update(Request $request, Server $server): JsonResponse {
+        $this->admin($request);
+        $input=$request->validate(['ip'=>'required|string|max:15','ports'=>'required|string|max:512','revision'=>'required|string|size:64','replace_mixed'=>'sometimes|boolean','build'=>'required|array']);
+        $node=Node::query()->findOrFail($server->node_id);
+        return $this->withNodeLock($node,function() use($request,$server,$input,$node) {
+            $server->refresh(); $node->refresh();
+            abort_if((int)$server->node_id!==(int)$node->id,409,'Server moved to another node. Reload.');
+            abort_unless($server->isInstalled(),409,'Server is not installed.');
+            $current=$this->snapshot($server);
+            abort_unless(hash_equals($current['revision'],$input['revision']),409,'Allocations changed since the form was loaded. Reload.');
+            abort_if($current['mixed'] && !($input['replace_mixed']??false),422,'Explicitly confirm replacing all existing bindings with one IP.');
+            // Unchanged legacy bindings are permitted when updating resource settings only.
+            if (!$current['mixed'] && $input['ip']===$current['ip'] && $input['ports']===$current['ports']) {
+                $ids=array_column($current['bindings'],'id');
+            } else {
+                [$ip,$ports]=$this->validateNetwork($node,$input);
+                // Never release a binding while its old container is still running.
+                // Require an explicit live offline state, not cached/missing data.
+                $details=Daemon::server($server)->details();
+                abort_unless(($details['state']??null)==='offline',409,'Stop the server before changing port bindings.');
+                $ids=$this->desiredIds($node,$ip,$ports,$server);
+            }
+            $diff=NetworkPlan::diff(array_column($current['bindings'],'id'),$ids);
+            $payload=$input['build'];
+            $payload['allocation_id']=$diff['primary'];
+            $payload['add_allocation_ids']=$diff['add'];
+            $payload['remove_allocation_ids']=$diff['remove'];
+            $request->replace($payload);
+            // The native request validates the route's Server model and native resource fields.
+            $native=app(UpdateServerBuildConfigurationRequest::class);
+            $resource=app(BuildController::class)($native,app(UpdatesServerBuild::class),$server);
+            return $resource->respond();
+        });
     }
 }
