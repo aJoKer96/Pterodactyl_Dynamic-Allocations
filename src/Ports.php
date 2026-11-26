@@ -16,6 +16,15 @@ final class Ports {
         }
         return $ports;
     }
+    /** Comma-separated input, first port is primary. Reject empty entries. */
+    public static function parseList(string $input): array {
+        $parts = array_map('trim', explode(',', $input));
+        if (in_array('', $parts, true)) throw new InvalidArgumentException('Enter a comma-separated list of ports without empty entries.');
+        foreach ($parts as $part) {
+            if (!preg_match('/^[0-9]{1,5}$/D', $part)) throw new InvalidArgumentException('Ports must be comma-separated integers.');
+        }
+        return self::parse(array_shift($parts), implode(',', $parts));
+    }
     public static function normalizeIp(string $ip): string {
         if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) || $ip === '0.0.0.0') throw new InvalidArgumentException('Select a specific IPv4 address; wildcard bindings are not supported.');
         return $ip;
